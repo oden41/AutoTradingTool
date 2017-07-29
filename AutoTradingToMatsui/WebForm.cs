@@ -47,14 +47,24 @@ namespace AutoTradingToMatsui
         }
 
         /// <summary>
+        /// トップページに遷移する
+        /// </summary>
+        public void GoToMain()
+        {
+            webBrowser.NavigateAndWait(mainURL);
+            if (webBrowser.Document.Body.InnerText.Contains("接続がキャンセル"))
+                Login();
+        }
+
+        /// <summary>
         /// メインページの状態から現物買の注文まで行う
         /// </summary>
         /// <param name="code"></param>
         /// <param name="stockUnit"></param>
         /// <param name="price"></param>
         /// <param name="isNariyuki"></param>
-        /// <param name="execCond"></param>
-        /// <param name="validDT"></param>
+        /// <param name="execCond">執行条件</param>
+        /// <param name="validDT">有効期間</param>
         /// <returns></returns>
         public bool BuyOrder(string code, int stockUnit, double price, bool isNariyuki, int execCond = 0, int validDT = 0)
         {
@@ -102,16 +112,112 @@ namespace AutoTradingToMatsui
                 //確認?
                 if (webBrowser.Document.Body.InnerText.Contains("時間外エラー"))
                     throw new Exception("時間外エラー");
+
+                //暗証パス入力
+                var doc = webBrowser.Document;
+                webBrowser.Document.GetElementsByTagName("input").GetElementsByName("submitPassword")[0].InnerText = TRADEPASS;
+                webBrowser.Document.GetElementsByTagName("input").Cast<HtmlElement>().Where(e => e.Name == "CONFIRM").First().InvokeMember("click");
+                Wait();
+
+                //お金があるか
+                if (webBrowser.Document.Body.InnerText.Contains("余力エラー"))
+                    throw new Exception("余力エラー");
+
             }
             catch (Exception e)
             {
+                Console.WriteLine(e.ToString());
+                GoToMain();
                 return false;
             }
 
             return true;
         }
 
-        public void CheckPortfolio()
+
+
+        /// <summary>
+        /// メインページの状態から現物売の注文まで行う
+        /// </summary>
+        /// <param name="code"></param>
+        /// <param name="stockUnit"></param>
+        /// <param name="price"></param>
+        /// <param name="isNariyuki"></param>
+        /// <param name="execCond">執行条件 0：なし，1：指成，2：寄付，3：引け</param>
+        /// <param name="validDT">有効期間</param>
+        /// <returns></returns>
+        public bool SellOrder(string code, int stockUnit, double price, bool isNariyuki, int execCond = 0, int validDT = 0)
+        {
+            try
+            {
+                if (webBrowser.Url.AbsoluteUri != mainURL)
+                    Login();
+                //株式取引選択
+                var topCollection = webBrowser.Document.GetElementsByTagName("a");
+                topCollection.Cast<HtmlElement>().Where(e => e.InnerText == "株式取引").First().InvokeMember("click");
+                Wait();
+
+                //現物売選択
+                var buyCollection = webBrowser.Document.GetElementsByTagName("a");
+                buyCollection.Cast<HtmlElement>().Where(e => e.InnerText == "現物売").First().InvokeMember("click");
+                Wait();
+
+                //銘柄コード入力
+                var selectStockCollection = webBrowser.Document.GetElementsByTagName("input");
+                selectStockCollection.GetElementsByName("dscrCD")[0].InnerText = code;
+                selectStockCollection.Cast<HtmlElement>().Where(e => e.Name == "CONFIRM").First().InvokeMember("click");
+                Wait();
+
+                //注文画面
+                var orderStockCollection = webBrowser.Document.GetElementsByTagName("input");
+                //株数
+                orderStockCollection.GetElementsByName("orderNominal")[0].InnerText = stockUnit.ToString();
+                if (!isNariyuki)
+                {
+                    //指値
+                    orderStockCollection.GetElementsByName("limitPrice")[0].InnerText = price.ToString();
+                }
+                else
+                {
+                    //成行
+                    orderStockCollection.Cast<HtmlElement>().Where(e => e.Name == "marketPrice").First().InvokeMember("click");
+                }
+                //執行条件
+                webBrowser.Document.GetElementsByTagName("select").GetElementsByName("execCondCD")[0].SetAttribute("value", execCond.ToString());
+                //有効期間
+                orderStockCollection.GetElementsByName("validDT")[validDT].InvokeMember("click");
+                orderStockCollection.Cast<HtmlElement>().Where(e => e.Name == "CONFIRM").First().InvokeMember("click");
+                Wait();
+
+                //確認?
+                if (webBrowser.Document.Body.InnerText.Contains("時間外エラー"))
+                    throw new Exception("時間外エラー");
+
+                //暗証パス入力
+                var doc = webBrowser.Document;
+                webBrowser.Document.GetElementsByTagName("input").GetElementsByName("submitPassword")[0].InnerText = TRADEPASS;
+                webBrowser.Document.GetElementsByTagName("input").Cast<HtmlElement>().Where(e => e.Name == "CONFIRM").First().InvokeMember("click");
+                Wait();
+
+                //お金があるか
+                if (webBrowser.Document.Body.InnerText.Contains("余力エラー"))
+                    throw new Exception("余力エラー");
+
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.ToString());
+                GoToMain();
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// 保有銘柄を辞書に登録するメソッド
+        /// </summary>
+        public bool CheckPortfolio()
         {
             try
             {
@@ -121,6 +227,7 @@ namespace AutoTradingToMatsui
                 if (portfolio == null)
                     portfolio = new Dictionary<string, object[]>();
 
+                portfolio.Clear();
                 //株式取引選択
                 var topCollection = webBrowser.Document.GetElementsByTagName("a");
                 topCollection.Cast<HtmlElement>().Where(e => e.InnerText == "株式取引").First().InvokeMember("click");
@@ -148,12 +255,8 @@ namespace AutoTradingToMatsui
             }
             catch (Exception e)
             {
-
+                return false;
             }
-        }
-
-        public bool SellOrder(string code, int stockUnit, double price, bool isNariyuki, int execCond = 0, int validDT = 0)
-        {
             return true;
         }
 
