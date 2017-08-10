@@ -46,6 +46,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="BuySell.cs" />
     <Compile Include="ExWebBrowser.cs">
       <SubType>Component</SubType>
     </Compile>
@@ -98,7 +99,7 @@
     </COMReference>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\..\..\..\Visual_Project\gprediction\GP\Utility\Utility.csproj">
+    <ProjectReference Include="..\Utility\Utility.csproj">
       <Project>{23CBDC6C-BF64-4460-B11C-A68D055F87AE}</Project>
       <Name>Utility</Name>
     </ProjectReference>

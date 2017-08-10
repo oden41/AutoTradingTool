@@ -20,8 +20,7 @@ namespace AutoTradingAtMatsui
             //Application.Run(new WebForm());
             var form = new WebForm();
             form.Login();
-            //form.BuyOrder("9739", 100, 1000, false);
-            form.CheckPortfolio();
+            form.CheckSign(DateTime.Today.AddDays(-1));
             form.ShowDialog();
         }
     }

@@ -1,14 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Configuration;
 using System.Data;
-using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 using Utility;
 
@@ -31,6 +28,7 @@ namespace AutoTradingToMatsui
         private List<KeyValuePair<string, int>> strategyList;
         //売買予定リスト
         private List<object[]> tradeList;
+        private List<string> sellList;
         private double CashAmount = -1;
         private double AllAssetAmount = -1;
 
@@ -46,6 +44,7 @@ namespace AutoTradingToMatsui
             strategyList.Add(new KeyValuePair<string, int>("../../SQL/20170612.sql", 20));
 
             tradeList = new List<object[]>();
+            sellList = new List<string>();
         }
 
         private void WebForm_Load(object sender, EventArgs e)
@@ -282,12 +281,84 @@ namespace AutoTradingToMatsui
 
 
         /// <summary>
+        /// 約定情報を確認するメソッド
+        /// TODO: 複数の約定があった場合
+        /// </summary>
+        public bool CheckContract()
+        {
+            try
+            {
+                if (webBrowser.Url?.AbsoluteUri != mainURL)
+                    Login();
+
+                if (portfolio == null)
+                    portfolio = new Dictionary<string, object[]>();
+
+                portfolio.Clear();
+                //株式取引選択
+                var topCollection = webBrowser.Document.GetElementsByTagName("a");
+                topCollection.Cast<HtmlElement>().Where(e => e.InnerText == "株式取引").First().InvokeMember("click");
+                Wait();
+
+                //現物売選択
+                var sellCollection = webBrowser.Document.GetElementsByTagName("a");
+                sellCollection.Cast<HtmlElement>().Where(e => e.InnerText == "約定照会").First().InvokeMember("click");
+                Wait();
+
+
+                var text = webBrowser.Document.Body.InnerText;
+                var split = text.Split(new string[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
+
+                for (int i = 0; i < split.Length; i = i + 11)
+                {
+                    var code = split[i + 1].Split(':')[1];
+                    var name = split[i + 2];
+                    var buyorsell = split[i + 3].Contains("買") ? BuySell.Buy : BuySell.Sell;
+                    var unit = split[i + 4].Split(':')[1].Replace("株", "");
+                    var price = split[i + 5].Split(':')[1].Replace("円", "");
+                    //var posDate = tradeList.Where(arr => arr[0].ToString() == code)?.First()[2].ToString();
+                    var posDate = "10";
+
+                    var insert = $@"INSERT INTO StockContract.dbo.ContractTable 
+(
+Date,
+CodeNum,
+Price,
+UnitNum,
+Type,
+State,
+PosDate
+)
+VALUES
+(
+'{DateTime.Today.ToShortDateString()}',
+'{code}',
+{price},
+{unit},
+'{buyorsell.DisplayName()}',
+'Pos',
+{posDate}
+)
+";
+                    db.ExecuteNonQuery(insert);
+                }
+
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+            return true;
+        }
+
+
+        /// <summary>
         /// DBを見に行き，前営業日にサインが点灯しているかをチェックする
         /// 存在していたらtradeListに銘柄コードと終値を追加
         /// </summary>
-        public void CheckSign()
+        public void CheckSign(DateTime date)
         {
-            var asOf = GetPrevWorkDay(DateTime.Today);
+            var asOf = GetPrevWorkDay(date);
             //銘柄コード，終値，保有日数
             var list = new List<object[]>();
             foreach (var strategy in strategyList)
@@ -302,8 +373,14 @@ namespace AutoTradingToMatsui
                     continue;
                 var filtered = result.Where(row => DateTime.Parse(row["AsOfDate"].ToString()) == asOf).ToList();
 
-                filtered.ForEach(row => tradeList.Add(new object[] { row["CodeNum"].ToString(), double.Parse(row["NowPrice"].ToString()) }));
+                filtered.ForEach(row => tradeList.Add(new object[] { row["CodeNum"].ToString(), double.Parse(row["NowPrice"].ToString()), strategy.Value}));
             }
+        }
+
+
+        public void CheckSign()
+        {
+            CheckSign(DateTime.Today);
         }
 
 
@@ -344,11 +421,23 @@ namespace AutoTradingToMatsui
 
 
         /// <summary>
+        /// 売却予定の銘柄があるかをチェック
+        /// </summary>
+        /// <returns></returns>
+        private bool CheckSellDate()
+        {
+            var sql = "SELECT CodeNum,StockNum,Type FROM ContractTable WHERE State='Pos'";
+
+            return true;
+        }
+
+
+        /// <summary>
         /// 本来は休日リストをDBに作るべきだが，今回はデータを追加した最終日を取得
         /// </summary>
         /// <param name="today"></param>
         /// <returns></returns>
-        public DateTime GetPrevWorkDay(DateTime today)
+        private DateTime GetPrevWorkDay(DateTime today)
         {
             var sql = $"SELECT LastDate FROM GPrediction.dbo.Utils WHERE id = 0";
             var date = db.ExecuteScalar(sql, new DateTime(1900, 1, 1));
@@ -365,6 +454,55 @@ namespace AutoTradingToMatsui
                 }
                 return result;
             }
+        }
+
+
+        /// <summary>
+        /// 今日市場が空いているかをチェックするメソッド
+        /// </summary>
+        /// <returns></returns>
+        public bool IsOpeningToday()
+        {
+            var url = "https://finance.yahoo.co.jp/";
+            var html = GetHTML(url);
+            if (html.Contains("日本の証券市場はお休み"))
+                return false;
+            else
+                return true;
+        }
+
+        /// <summary>
+        /// URLから該当のHTMLを返すメソッド
+        /// </summary>
+        /// <param name="url"></param>
+        /// <returns></returns>
+        private static string GetHTML(string url)
+        {
+            using (var wc = new WebClient())
+            {
+                wc.Encoding = Encoding.UTF8;
+                wc.Proxy = null;
+                return wc.DownloadString(url);
+            }
+        }
+
+
+        /// <summary>
+        /// 市場開始前に行う処理を実行する 8:55くらい？
+        /// </summary>
+        public void OpeningAction()
+        {
+            //市場があく日かのチェック
+            if (!IsOpeningToday())
+                return;
+
+            //今日売るべきものがあるかのチェック
+            if (!CheckPortfolio())
+                return;
+
+            //DBをチェックして今日売るべき銘柄があるかをチェック
+            if (!CheckSellDate())
+                return;
         }
 
 

@@ -2,3 +2,5 @@ bin
 obj
 /AutoTradingToMatsui/App.config
 /AutoTradingToMatsui/SQL
+/OANDA_API/*.config
+/Utility/*.config
