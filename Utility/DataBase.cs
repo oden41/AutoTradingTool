@@ -13,7 +13,12 @@ namespace Utility
     {
         public string ConnString
         {
-            get { return ConfigurationManager.AppSettings["ConnString"]; }
+            get;set;
+        }
+
+        public DataBase()
+        {
+            this.ConnString = ConfigurationManager.AppSettings["ConnString"];
         }
 
 
