@@ -15,20 +15,52 @@ namespace OANDA_API
     class AutoFX
     {
         /// <summary>
-        /// id,unit,sellDate
+        /// 最大マージン
         /// </summary>
-        private List<Tuple<long, int, DateTime>> orderList;
+        private static readonly double MAX_MARGIN = 0.30;
+        /// <summary>
+        /// 1トレードあたりの最大マージン
+        /// </summary>
+        private static readonly double MAX_MARGIN_PERTRADE = 0.10;
+        /// <summary>
+        /// 売買の基準となるユニット数
+        /// </summary>
+        private static readonly int UNIT = 5000;
+        /// <summary>
+        /// レバレッジ，USD/JPYは0.04
+        /// </summary>
+        private static readonly double LEVERAGE = 0.04;
+
+        private static readonly int SELLTERM = 10;
+
+        /// <summary>
+        /// id,sellDate
+        /// </summary>
+        private List<Tuple<long, DateTime>> orderList;
 
         private DataBase DB { get; set; }
-
+        /// <summary>
+        /// アカウントID
+        /// </summary>
         private int AccId { get; set; }
+        /// <summary>
+        /// 
+        /// </summary>
+        private double Margin { get; set; }
+        /// <summary>
+        /// strategySQL,side
+        /// </summary>
+        private List<KeyValuePair<string,string>> strategy;
 
-        private string Strategy = "1 == 1";
 
         public AutoFX()
         {
             DB = new DataBase();
             AccId = int.Parse(ConfigurationManager.AppSettings["AccountId"]);
+            orderList = new List<Tuple<long, DateTime>>();
+            strategy = new List<KeyValuePair<string, string>>();
+            //strategy.Add(new KeyValuePair<string, string>("1=1", "buy"));
+            strategy.Add(new KeyValuePair<string, string>("1=1", "sell"));
         }
 
 
@@ -37,6 +69,7 @@ namespace OANDA_API
         /// </summary>
         public void Start()
         {
+            var lastCheck = DateTime.MinValue;
             //営業時間まで待機
             while (!IsOpenMarket())
                 Thread.Sleep(1000);
@@ -44,24 +77,78 @@ namespace OANDA_API
             while (IsOpenMarket())
             {
                 //10分毎(分が10の倍数)まで待機
-                while (DateTime.Today.Minute % 10 != 0)
+                while (DateTime.Now.Minute % 10 != 0 || (DateTime.Now - lastCheck).TotalSeconds < 60 * 10 * 1.5)
                     Thread.Sleep(1000);
 
+                //保持しているポジション一覧を取得
+                var tradeList = Rest.GetTradeList(AccId);
+
+                //覚えのないID -> orderListに追加
+                var idList = tradeList.Where(item => !orderList.Select(tuple => tuple.Item1).Contains(item.id)).Select(item => item.id).ToList();
+                idList.ForEach(item =>
+                {
+                    orderList.Add(Tuple.Create(item, DateTime.Now.AddMinutes(SELLTERM)));
+                });
+
                 //売るタイミングでポジションが残ってるなら決済
-                foreach(var order in orderList.Where(data => data.Item3 >= DateTime.Now))
+                foreach (var order in orderList.Where(data => data.Item2 <= DateTime.Now))
                 {
-
+                    //IDで照合
+                    var pos = tradeList.Where(item => item.id == order.Item1).FirstOrDefault();
+                    if(pos != null)
+                    {
+                        //反対売買を行う
+                        Order(pos.units, pos.side == "buy" ? "sell" : "buy");
+                    }
                 }
 
-                if (GetCandle())
+                //データ取得，テクニカル指標生成
+                var candles = new List<Candle>();
+                //最新の足の取得には数秒ずれるため
+                do
                 {
-                    //戦略にヒット
+                    candles = GetCandle();
+                } while ((DateTime.Now - candles.Last().time).TotalSeconds >  60 * 10 * 1.5);
+                var lastDate = MakeIndex(candles);
+                foreach (var str in strategy)
+                {
+                    var selectSQL = $"SELECT COUNT(AsOfDate) FROM IndexData_10m_2017 WHERE AsOfDate = '{lastDate.ToString("yyyy-MM-dd HH:mm:ss")}' AND {str.Key}";
+                    if (DB.ExecuteScalar(selectSQL, 0) != 0)
+                    {
+                        //marginを元にユニット数を設定
+                        var units = 0;
+                        var detail = Rest.GetAccountDetails(AccId);
+                        var used = detail.marginUsed;
+                        var denom = detail.balance + detail.unrealizedPl;
+                        var nowMargin = detail.MarginLiquidationRate;
+                        var margin = nowMargin;
+                        var nowPrice = candles.Last().closeMid;
+                        while (margin < nowMargin + MAX_MARGIN_PERTRADE && margin < MAX_MARGIN)
+                        {
+                            units += UNIT;
+                            margin = (used + nowPrice * units) * LEVERAGE * 0.5 / (denom);
+                        }
+                        //注文
+                        if (units > 0)
+                        {
+                            var id = Order(units, str.Value);
+                            //orderListに追加
+                            orderList.Add(Tuple.Create(id, lastDate.AddMinutes(SELLTERM)));
+                        }
+                    }
                 }
+
+                lastCheck = lastDate;
             }
 
         }
 
-        public bool IsOpenMarket()
+
+        /// <summary>
+        /// 営業日かどうかを返す
+        /// </summary>
+        /// <returns></returns>
+        private bool IsOpenMarket()
         {
             //夏・冬時間
             int start = DateTime.Today.Month >= 3 || DateTime.Today.Month <= 11 ? 6 : 7;
@@ -71,9 +158,27 @@ namespace OANDA_API
 
 
         /// <summary>
+        /// 注文メソッド
+        /// </summary>
+        /// <param name="units"></param>
+        /// <param name="side"></param>
+        /// <param name="instrument"></param>
+        /// <returns></returns>
+        private long Order(int units,string side,string instrument = "USD_JPY")
+        {
+            var dir = new Dictionary<string, string>();
+            dir.Add("instrument", "USD_JPY");
+            dir.Add("units", units.ToString());
+            dir.Add("side", side);
+            dir.Add("type", "market");
+            return Rest.PostMarketOrder(AccId, dir);
+        }
+
+
+        /// <summary>
         /// 直近dataCount本のデータを取得し，DBに追加
         /// </summary>
-        private bool GetCandle(int dataCount = 500)
+        private List<Candle> GetCandle(int dataCount = 500)
         {
             var result = Rest.GetCandles("USD_JPY", AccId, count: dataCount);
             var sql = "SELECT MAX(time) FROM USDJPY_10m";
@@ -116,16 +221,16 @@ VALUES
                 DB.ExecuteNonQuery(insertSQL);
             }
             //テクニカル指標生成
-            return MakeIndex(result);
+            return result;
         }
 
 
         /// <summary>
-        /// resultからテクニカル指標を生成し，戦略にヒットするかを返す
+        /// resultからテクニカル指標を生成,直近のDateを返す
         /// </summary>
         /// <param name="result"></param>
         /// <returns></returns>
-        private bool MakeIndex(List<Candle> result)
+        private DateTime MakeIndex(List<Candle> result)
         {
             var highStock = new List<double>(result.Select(row => row.highMid));
             var lowStock = new List<double>(result.Select(row => row.lowMid));
@@ -248,21 +353,19 @@ RegisterDate
   B5.ToString("D") + "," +
   S1.ToString("D") + "," +
   S2.ToString("D") + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
-  DBNull.Value + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
+  "NULL" + "," +
 "'" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "'" +
   ")";
             DB.ExecuteNonQuery(sql);
 
-            var lastDate = dateStock.Last();
-            var selectSQL = $"SELECT COUNT(AsOfDate) FROM IndexData_10m_2017 WHERE AsOfDate = '{lastDate.ToString("yyyy-MM-dd HH:mm:ss")}' AND {Strategy}";
-            return DB.ExecuteScalar(selectSQL, 0) != 0;
+            return dateStock.Last();
         }
 
 
